@@ -1,0 +1,4 @@
+test.ini
+logs/*
+*.pyc
+.idea
