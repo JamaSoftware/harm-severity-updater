@@ -3,22 +3,131 @@ import sys
 import logging
 import datetime
 import configparser
+from typing import Callable, Union
 
 from py_jama_rest_client.client import JamaClient
 from py_jama_rest_client.client import APIException
 
 logger = logging.getLogger(__name__)
 
+# This dictionary will store Items that we have already fetched and may use again.
+fetched_items = {}
 
-def update_harms(jama_client: JamaClient, config: configparser.ConfigParser):
+# This is a list of Jama core field names so that we can appropriatly apply the "$itemType" field name nomenclature
+core_fields = [
+    "name",
+    "description",
+    "documentKey",
+    "globalId"
+]
+
+
+def fetch_item(referenced_iot_item_id):
+    fetched_items[referenced_iot_item_id] = jama_client.get_item(referenced_iot_item_id)
+
+
+def process_iot(item: dict,
+                iot_field: str,
+                dest_field: str,
+                source_field: str,
+                transform_function: Callable[[object], object] = None) -> Union[None, dict]:
+    """
+    This function will fetch the item referenced by the iot_field parameter.  Then it will get the data from the
+    specified source_field in that de-referenced and fetched item and apply its value to the dest_field in item the
+    original item.  Optionally a transform function may be supplied to convert the source field data into the
+    appropriate form for the destination field. This may be useful for mapping pick list options or applying any other
+    custom logic to the data.
+    :param item: This is the destination item; it contains the iot_field, data will be moved from the src_field in the
+    referenced item to the dest_field in this item.
+    :param iot_field: The Unique Field Name of the Item Of Type field that contains an item reference to be fetched.
+    :param dest_field: The Unique Field Name of the destination field within item
+    :param source_field: The Unique Field Name of the source field within the item that is referenced by the
+    referenced item of type field.
+    :param transform_function: This optional function should accept the data found in source_field, and know how to
+    appropriately transform and return data in an acceptable format for the dest_field.
+    :return: A dictionary that represents a patch for item OR None if no changes are needed or applicable.
+    """
+    try:
+        patch = None  # This will be the object we eventually return
+
+        item_type_id = item.get('itemType')
+        item_type_id_str = str(item_type_id)
+        item_fields = item.get('fields')
+
+        iot_field_name = iot_field
+        if iot_field not in core_fields:
+            iot_field_name = "{}${}".format(iot_field, item_type_id_str)
+
+        # Check to see if IOT field has data, if not this operation is nonsense.
+        if iot_field_name not in item_fields:
+            logger.warning("Item [{}] has no data in Item Of Type field [{}].  Skipping."
+                           .format(item_type_id_str, iot_field))
+            return patch
+
+        # Now fetch the referenced item.
+        referenced_iot_item_id = item_fields.get(iot_field_name)
+        if referenced_iot_item_id not in fetched_items:
+            try:
+                fetch_item(referenced_iot_item_id)
+            except APIException:
+                logger.error("Unable to fetch referenced Item of Type item [{}]. Skipping processing."
+                             .format(referenced_iot_item_id))
+                return patch
+        referenced_iot_item = fetched_items[referenced_iot_item_id]
+        referenced_item_itemtype_id = referenced_iot_item.get('itemType')
+
+        # Get the desired data from the source field in the referenced item
+        source_field_name = source_field
+        if source_field not in core_fields:
+            source_field_name = "{}${}".format(source_field, referenced_item_itemtype_id)
+        source_data = referenced_iot_item.get('fields').get(source_field_name)
+
+        # Perform any required data transformation
+        destination_data = source_data
+        if transform_function is not None:
+            destination_data = transform_function(source_data)
+
+        # Prepare a patch if required.
+        dest_field_name = dest_field
+        if dest_field not in core_fields:
+            dest_field_name = "{}${}".format(dest_field, item_type_id_str)
+
+        # Determine what kind of patch is needed
+        if dest_field_name in item_fields and destination_data == item_fields.get(dest_field_name):
+            return patch
+        elif dest_field_name in item_fields:
+            patch = {
+                "op": "replace",
+                "path": "/fields/{}".format(dest_field_name),
+                "value": destination_data
+            }
+        else:
+            patch = {
+                "op": "add",
+                "path": "/fields/{}".format(dest_field_name),
+                "value": destination_data
+            }
+
+        return patch
+    except Exception as ex:
+        logger.error("Error processing Item of Type field. Source: {} Destination: {} Because: {}"
+                     .format(source_field, dest_field, ex))
+        return None
+
+
+def update_harms(config: configparser.ConfigParser):
     # Get Script settings from config
     filter_id = None
     destination_item_type_id = None
     destination_harm_identifier_field_name = None
     destination_harm_severity_field_name = None
+    destination_harm_description_field_name = None
     destination_revised_harm_identifier_field_name = None
     destination_revised_harm_severity_field_name = None
+    destination_revised_harm_description_field_name = None
     source_harm_severity_field_name = None
+    source_harm_description_field_name = None
+
     try:
         filter_id = config.getint('SCRIPT_SETTINGS', 'destination_filter_id')
         destination_item_type_id = config.getint('SCRIPT_SETTINGS', 'destination_item_type_id')
@@ -26,13 +135,19 @@ def update_harms(jama_client: JamaClient, config: configparser.ConfigParser):
                                                             'destination_harm_identifier_field_name').strip()
         destination_harm_severity_field_name = config.get('SCRIPT_SETTINGS',
                                                           'destination_harm_severity_field_name').strip()
+        destination_harm_description_field_name = config.get('SCRIPT_SETTINGS',
+                                                             'destination_harm_description_field_name').strip()
         destination_revised_harm_identifier_field_name = config.get('SCRIPT_SETTINGS',
                                                                     'destination_revised_harm_identifier_field_name') \
             .strip()
         destination_revised_harm_severity_field_name = config.get('SCRIPT_SETTINGS',
                                                                   'destination_revised_harm_severity_field_name') \
             .strip()
+        destination_revised_harm_description_field_name = config.get('SCRIPT_SETTINGS',
+                                                                     'destination_revised_harm_description_field_name')\
+            .strip()
         source_harm_severity_field_name = config.get('SCRIPT_SETTINGS', 'source_harm_severity_field_name').strip()
+        source_harm_description_field_name = config.get('SCRIPT_SETTINGS', 'source_harm_description_field_name').strip()
 
     except configparser.Error as config_error:
         logger.error("Unable to parse SCRIPT_SETTINGS because: {} Please check settings and try again."
@@ -40,7 +155,6 @@ def update_harms(jama_client: JamaClient, config: configparser.ConfigParser):
         exit(1)
 
     # Settings Loaded Begin processing.
-
     # Pull down source Data.
     logger.info("Fetching Filter Data")
     destination_items = None
@@ -52,104 +166,36 @@ def update_harms(jama_client: JamaClient, config: configparser.ConfigParser):
     # Filter down to only the item type we care about, removing texts and folders
     destination_items = [item for item in destination_items if item.get('itemType') == destination_item_type_id]
 
-    # Create a dictionary of Harm items so that we do not pull items twice.
-    harms = {}
     # for each item in destination_items we need to fetch the downstream harm and the downstream revised harm
     for item in destination_items:
         logger.info("Processing item: [{}]".format(str(item.get('id'))))
-        item_type = item.get('itemType')
-        item_fields = item.get('fields')
-        severity_patch = None
-        revised_severity_patch = None
-        try:
-            # fetch and update the harm severity
-            if destination_harm_identifier_field_name + '$' + str(item_type) in item_fields:
-                harm_reference = item_fields.get(destination_harm_identifier_field_name + '$' + str(item_type))
-                if harm_reference not in harms:
-                    try:
-                        harms[harm_reference] = jama_client.get_item(harm_reference)
-                        harm = harms[harm_reference]
-                        harm_severity = harm.get('fields').get(
-                            source_harm_severity_field_name + '$' + str(harm.get('itemType')))
 
-                        # Now that we have severity create a patch object to post. unless we have no changes
-                        if destination_harm_severity_field_name + '$' + str(item_type) in item_fields \
-                                and harm_severity == item_fields.get(destination_harm_severity_field_name
-                                                                     + '$' + str(item_type)):
-                            # field is already set to the desired value.
-                            logger.info("Skipping harm severity patch, there are no changes")
-                        elif destination_harm_severity_field_name + '$' + str(item_type) in item_fields:
-                            severity_patch = {
-                                "op": "replace",
-                                "path": "/fields/{}${}".format(destination_harm_severity_field_name, str(item_type)),
-                                "value": harm_severity
-                            }
-                        else:
-                            severity_patch = {
-                                "op": "add",
-                                "path": "/fields/{}${}".format(destination_harm_severity_field_name, str(item_type)),
-                                "value": harm_severity
-                            }
-                    except APIException as ex:
-                        logger.error("Unable to fetch referenced harm: {} Because: {}"
-                                     .format(str(harm_reference), str(ex)))
+        patches = [process_iot(item,
+                               destination_harm_identifier_field_name,
+                               destination_harm_severity_field_name,
+                               source_harm_severity_field_name),
+                   process_iot(item,
+                               destination_harm_identifier_field_name,
+                               destination_harm_description_field_name,
+                               source_harm_description_field_name),
+                   process_iot(item,
+                               destination_revised_harm_identifier_field_name,
+                               destination_revised_harm_severity_field_name,
+                               source_harm_severity_field_name),
+                   process_iot(item,
+                               destination_revised_harm_identifier_field_name,
+                               destination_revised_harm_description_field_name,
+                               source_harm_description_field_name)
+                   ]
 
-            else:
-                logger.info("Cannot fetch Item of Type.  Item {} has no data in {} field."
-                            .format(str(item.get('id')), destination_harm_identifier_field_name))
+        patches = [patch for patch in patches if patch is not None]
 
-            # Fetch and update Revised harm
-            if destination_revised_harm_identifier_field_name + '$' + str(item_type) in item_fields:
-                # Now update the revised harm severity
-                revised_harm_reference = item_fields.get(destination_revised_harm_identifier_field_name + '$'
-                                                         + str(item_type))
-                if revised_harm_reference not in harms:
-                    try:
-                        harms[revised_harm_reference] = jama_client.get_item(revised_harm_reference)
-                        revised_harm = harms[revised_harm_reference]
-                        revised_harm_severity = revised_harm.get('fields').get(source_harm_severity_field_name + '$' +
-                                                                               str(revised_harm.get('itemType')))
-                        # Now that we have severity create a patch object to post. If there are changes
-                        if destination_revised_harm_severity_field_name + '$' + str(item_type) in item_fields \
-                                and revised_harm_severity == item_fields.get(
-                                    destination_revised_harm_severity_field_name + '$' + str(item_type)):
-                            logger.info("Skipping revised harm severity patch, there are no changes")
-                        elif destination_revised_harm_severity_field_name + '$' + str(item_type) in item_fields:
-                            revised_severity_patch = {
-                                "op": "replace",
-                                "path": "/fields/{}${}".format(destination_revised_harm_severity_field_name,
-                                                               str(item_type)),
-                                "value": revised_harm_severity
-                            }
-                        else:
-                            revised_severity_patch = {
-                                "op": "add",
-                                "path": "/fields/{}${}".format(destination_revised_harm_severity_field_name,
-                                                               str(item_type)),
-                                "value": revised_harm_severity
-                            }
-                    except APIException as ex:
-                        logger.error("Unable to fetch referenced harm: {} Because: {}"
-                                     .format(str(revised_harm_reference), str(ex)))
-            else:
-                logger.info("Cannot fetch Item of Type.  Item {} has no data in {} field."
-                            .format(str(item.get('id')), destination_revised_harm_identifier_field_name))
-            # Build the patch array and patch the item.
-            patches = []
-            if severity_patch is not None:
-                patches.append(severity_patch)
-            if revised_severity_patch is not None:
-                patches.append(revised_severity_patch)
-
-            if len(patches) > 0:
-                try:
-                    logger.info("Patching item: {}".format(str(item.get('id'))))
-                    jama_client.patch_item(item.get('id'), patches)
-                except APIException as error:
-                    logger.error("Unable to patch item: {} because: {}".format(str(item.get('id')), str(error)))
-
-        except Exception as ex:
-            logger.error("Unable to process item: [{}] Because: {}".format(str(item.get('id')), str(ex)))
+        if len(patches) > 0:
+            try:
+                logger.info("Patching item: {}".format(str(item.get('id'))))
+                jama_client.patch_item(item.get('id'), patches)
+            except APIException as error:
+                logger.error("Unable to patch item: {} because: {}".format(str(item.get('id')), str(error)))
 
 
 def init_logging():
@@ -212,9 +258,9 @@ if __name__ == "__main__":
     conf = parse_config()
 
     # Create Jama Client
-    client = create_jama_client(conf)
+    jama_client = create_jama_client(conf)
 
     # Begin business logic
-    update_harms(client, conf)
+    update_harms(conf)
 
     logger.info("Done.")
