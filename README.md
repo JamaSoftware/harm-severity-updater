@@ -71,13 +71,24 @@ references a Harm.
 
 * destination_harm_severity_field_name: The unique field name of the severity field in the destination item.
 
+* destination_harm_description_field_name: The unique field name of the harm description field to be updated in 
+the destination item.
+
 * destination_revised_harm_identifier_field_name: The unique field name of of the revised harm Item of Type field in the
 destination item.
 
 * destination_revised_harm_severity_field_name: The unique field name of revised severity field in the destination item.
 
+* destination_revised_harm_description_field_name: The unique field name of the revised harm description field to be updated 
+in the destination item.
+
 * source_harm_severity_field_name: The unique field name of the field in the source item that contains the desired data
-to be retrieved and placed into the destination item.
+to be retrieved and placed into the destination item. This field data is populated into the 
+
+* source_harm_description_field_name: The unique field name of the field in the source item that contains the desired data
+to be retrieved and placed into the destination item.  This field data is populated into the
+<destination_harm_severity_field_name> and the <destination_revised_harm_severity_field_name>
+<destination_harm_description_field_name> and the <destination_revised_harm_description_field_name> 
 
 ## Running the script
 
