@@ -83,11 +83,11 @@ destination item.
 in the destination item.
 
 * source_harm_severity_field_name: The unique field name of the field in the source item that contains the desired data
-to be retrieved and placed into the destination item. This field data is populated into the 
+to be retrieved and placed into the destination item. This field data is populated into the
+<destination_harm_severity_field_name> and the <destination_revised_harm_severity_field_name>
 
 * source_harm_description_field_name: The unique field name of the field in the source item that contains the desired data
 to be retrieved and placed into the destination item.  This field data is populated into the
-<destination_harm_severity_field_name> and the <destination_revised_harm_severity_field_name>
 <destination_harm_description_field_name> and the <destination_revised_harm_description_field_name> 
 
 ## Running the script
